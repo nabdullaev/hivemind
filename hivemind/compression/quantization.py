@@ -189,3 +189,44 @@ class BlockwiseQuantization(Quantization):
         quantized = torch.as_tensor(quantized).reshape(tuple(serialized_tensor.size))
         result = dequantize_blockwise(quantized, (absmax, codebook, *self.EXTRA_PARAMS))
         return result.to(getattr(torch, serialized_tensor.dtype)).requires_grad_(serialized_tensor.requires_grad)
+    
+    
+class EF21Compression(Quantization):
+    """
+    Implements Error Feedback 21 (EF21) using a base quantization scheme.
+    """
+
+    def __init__(self, base_compression, param_shapes):
+        """
+        Args:
+            base_compression: An instance of a Quantization subclass (e.g., Uniform8BitQuantization).
+            param_shapes: Dictionary of parameter names and their shapes.
+        """
+        super().__init__()
+        self.base_compression = base_compression
+        self.errors = {name: torch.zeros(shape) for name, shape in param_shapes.items()}
+
+    def compress(self, tensor: torch.Tensor, info: CompressionInfo, allow_inplace: bool = False) -> runtime_pb2.Tensor:
+        """
+        Compress tensor with error feedback.
+        """
+        param_name = info.descriptor.name  # Get parameter name from info
+        error = self.errors[param_name]
+
+        # Add error feedback to the tensor
+        adjusted_tensor = tensor + error
+
+        # Compress the adjusted tensor using base compression
+        compressed_tensor = self.base_compression.compress(adjusted_tensor, info, allow_inplace)
+
+        # Update the error vector
+        decompressed_tensor = self.base_compression.extract(compressed_tensor)
+        self.errors[param_name] = adjusted_tensor - decompressed_tensor
+
+        return compressed_tensor
+
+    def extract(self, serialized_tensor: runtime_pb2.Tensor) -> torch.Tensor:
+        """
+        Decompress the tensor using the base compression method.
+        """
+        return self.base_compression.extract(serialized_tensor)
